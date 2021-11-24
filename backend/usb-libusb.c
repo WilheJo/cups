@@ -186,8 +186,7 @@ print_device(const char *uri,		/* I - Device URI */
   int		have_sidechannel = 0,	/* Was the side-channel thread started? */
 		have_backchannel = 0;   /* Do we have a back channel? */
   struct stat   sidechannel_info;	/* Side-channel file descriptor info */
-  unsigned char	print_buffer[8192],	/* Print data buffer */
-		*print_ptr;		/* Pointer into print data buffer */
+  unsigned char	print_buffer[8192];	/* Print data buffer */
   fd_set	input_set;		/* Input set for select() */
   int		nfds;			/* Number of file descriptors */
   struct timeval *timeout,		/* Timeout pointer */
@@ -336,7 +335,6 @@ print_device(const char *uri,		/* I - Device URI */
   g.drain_output = 0;
   g.print_bytes	 = 0;
   total_bytes	 = 0;
-  print_ptr	 = print_buffer;
 
   while (status == CUPS_BACKEND_OK && copies-- > 0)
   {
@@ -462,8 +460,6 @@ print_device(const char *uri,		/* I - Device URI */
 	  break;
 	}
 
-	print_ptr = print_buffer;
-
 	fprintf(stderr, "DEBUG: Read %d bytes of print data...\n",
 		(int)g.print_bytes);
       }
@@ -534,7 +530,6 @@ print_device(const char *uri,		/* I - Device URI */
 	          (int)bytes);
 
 	  g.print_bytes -= bytes;
-	  print_ptr   += bytes;
 	  total_bytes += bytes;
 	}
       }
