@@ -65,6 +65,7 @@ int		LastSet;		/* Number of repeat characters */
 int		ModelNumber,		/* cupsModelNumber attribute */
 		Page,			/* Current page */
 		Canceled;		/* Non-zero if job is canceled */
+unsigned int	ZPLBitmapDataFormat=0;	/* ZPL data format (0 - ASCII, 1 - ASCII with zero-fill+ones-fill+line-repeat, 2 - run-length encoded) */
 
 
 /*
@@ -88,7 +89,9 @@ void
 Setup(ppd_file_t *ppd)			/* I - PPD file */
 {
   int		i;			/* Looping var */
+  ppd_choice_t	*choice;		/* Marked choice */
 
+  ZPLBitmapDataFormat=0;		/* Global used to select the ZPL data format (ASCII, ASCII with zero-fill+ones-fill+line-repeat, run-length encoded) */
 
  /*
   * Get the model number from the PPD file...
@@ -125,6 +128,24 @@ Setup(ppd_file_t *ppd)			/* I - PPD file */
 	break;
 
     case ZEBRA_ZPL :
+        if ((choice = ppdFindMarkedChoice(ppd, "zeBitmapDataFormat")) != NULL)
+        {
+            if (!strcmp(choice->choice, "PlainAscii"))
+                ZPLBitmapDataFormat=0;
+            else if (!strcmp(choice->choice, "ReducedAscii"))
+                ZPLBitmapDataFormat=1;
+            else if (!strcmp(choice->choice, "RunLenghCompressed"))
+                ZPLBitmapDataFormat=2;
+            else {
+                fprintf(stderr, "DEBUG: unknown data format zeBitmapDataFormat='%s'; using 'PlainAscii'\n", choice->choice);
+                ZPLBitmapDataFormat=0;
+            }
+        }
+        else
+        {
+            /* this ensures that we don't break working setups... */
+            ZPLBitmapDataFormat=2;
+        }
         break;
 
     case ZEBRA_CPCL :
@@ -492,11 +513,22 @@ EndPage(ppd_file_t          *ppd,	/* I - PPD file */
         puts("^XA");
 
        /*
-        * Rotate 180 degrees so that the top of the label/page is at the
+        * Allows to rotate 180 degrees so that the top of the label/page is at the
 	* leading edge...
 	*/
 
-	puts("^POI");
+	if ((choice = ppdFindMarkedChoice(ppd, "zePrintRotate")) != NULL)
+	{
+		if (!strcmp(choice->choice, "180"))
+			puts("^POI");
+		else if (!strcmp(choice->choice, "0"))
+			puts("^PON");
+	}
+	else
+	{
+		/* This makes ensures that we don't break working setups... */
+		puts("^POI");
+	}
 
        /*
         * Set print width...
@@ -799,13 +831,13 @@ OutputLine(ppd_file_t         *ppd,	/* I - PPD file */
 
     case ZEBRA_ZPL :
        /*
-	* Determine if this row is the same as the previous line.
+	* As long as we're not in plain ASCII mode, determine if this row is the same as the previous line.
         * If so, output a ':' and return...
         */
 
         if (LastSet)
 	{
-	  if (!memcmp(Buffer, LastBuffer, header->cupsBytesPerLine))
+	  if (!memcmp(Buffer, LastBuffer, header->cupsBytesPerLine) && ZPLBitmapDataFormat!=0)
 	  {
 	    putchar(':');
 	    return;
@@ -813,52 +845,97 @@ OutputLine(ppd_file_t         *ppd,	/* I - PPD file */
 	}
 
        /*
-        * Convert the line to hex digits...
-	*/
-
-	for (ptr = Buffer, compptr = CompBuffer, i = header->cupsBytesPerLine;
-	     i > 0;
-	     i --, ptr ++)
-        {
-	  *compptr++ = hex[*ptr >> 4];
-	  *compptr++ = hex[*ptr & 15];
-	}
-
-        *compptr = '\0';
-
-       /*
         * Run-length compress the graphics...
 	*/
 
-	for (compptr = CompBuffer + 1, repeat_char = CompBuffer[0], repeat_count = 1;
-	     *compptr;
-	     compptr ++)
-	  if (*compptr == repeat_char)
-	    repeat_count ++;
-	  else
-	  {
-	    ZPLCompress(repeat_char, repeat_count);
-	    repeat_char  = *compptr;
-	    repeat_count = 1;
-	  }
+    if (ZPLBitmapDataFormat==2)
+    {
+            /*
+            * Convert the line to hex digits...
+        */
 
-        if (repeat_char == '0')
-	{
-	 /*
-	  * Handle 0's on the end of the line...
-	  */
+        for (ptr = Buffer, compptr = CompBuffer, i = header->cupsBytesPerLine;
+            i > 0;
+            i --, ptr ++)
+            {
+        *compptr++ = hex[*ptr >> 4];
+        *compptr++ = hex[*ptr & 15];
+        }
 
-	  if (repeat_count & 1)
-	  {
-	    repeat_count --;
-	    putchar('0');
-	  }
+            *compptr = '\0';
+        for (compptr = CompBuffer + 1, repeat_char = CompBuffer[0], repeat_count = 1;
+            *compptr;
+            compptr ++)
 
-          if (repeat_count > 0)
-	    putchar(',');
-	}
-	else
-	  ZPLCompress(repeat_char, repeat_count);
+        if (*compptr == repeat_char)
+            repeat_count ++;
+        else
+        {
+            ZPLCompress(repeat_char, repeat_count);
+            repeat_char  = *compptr;
+            repeat_count = 1;
+        }
+
+            if (repeat_char == '0')
+        {
+        /*
+        * Handle 0's on the end of the line...
+        */
+
+        if (repeat_count & 1)
+        {
+            repeat_count --;
+            putchar('0');
+        }
+
+            if (repeat_count > 0)
+            putchar(',');
+        }
+        else
+        ZPLCompress(repeat_char, repeat_count);
+    } else {
+        int zero_fill=0; 
+        int one_fill=0;
+
+        unsigned int fill_start_index=header->cupsBytesPerLine;
+
+        if (ZPLBitmapDataFormat!=0) {
+            for (i=0;i<header->cupsBytesPerLine;i++) {
+                unsigned char tmp=Buffer[i];
+                if ( zero_fill==0 && tmp==0x00 ) {
+                    fill_start_index=i;
+                    zero_fill=1;
+                } else  if ( one_fill==0 && tmp==0xff ) {
+                    fill_start_index=i;
+                    one_fill=1;
+                } else if (tmp!=0x00 && tmp != 0xff) {
+                    one_fill=0;
+                    zero_fill=0;
+                }
+            }
+
+            if (fill_start_index==0) {
+                if (zero_fill) {
+                    putchar(',');
+                }
+                if (one_fill) {
+                    putchar('!');
+                }
+            }
+        }
+
+        for (i=0; i< fill_start_index; i++)
+        {
+            unsigned char tmp=Buffer[i];
+            putchar(hex[tmp >> 4]);
+            putchar(hex[tmp & 15]);
+        }
+
+        if (zero_fill)
+            putchar(',');
+        if (one_fill)
+            putchar('!');
+    }
 
 	fflush(stdout);
 

@@ -1021,6 +1021,14 @@ Version "2.3"
 	*Choice "Saved/Printer Default" ""
 	Choice "Thermal/Thermal Transfer Media" "<</MediaType(Thermal)>>setpagedevice"
 	Choice "Direct/Direct Thermal Media" "<</MediaType(Direct)>>setpagedevice"
+      Option "zeBitmapDataFormat/Bitmap Data Format" PickOne AnySetup 20.0
+	Choice "PlainAscii/Plain Ascii" ""
+	Choice "ReducedAscii/Ascii (fill lines)" ""
+	*Choice "RunLenghCompressed/Ascii (Run Lengh Compressed)" ""
+      Option "zePrintRotate/Rotate Label" PickOne AnySetup 20.0
+	*Choice "180/Top of the label/page is at the leading edge)" ""
+	Choice "0/No rotation" ""
+	Choice "NoPOCmd/Do set orientation" ""
     Group "PrinterSettings/Printer Settings"
       Option "Darkness" PickOne AnySetup 20.0
 	*Choice "-1/Printer Default" "<</cupsCompression -1>>setpagedevice"
