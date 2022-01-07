@@ -57,6 +57,11 @@
  * Globals...
  */
 
+unsigned char   *LastBitmap;    /* Buffer holding the last bitmap; only used for ZPL portion */
+unsigned char   *ThisBitmap;    /* Buffer holding the current bitmap; only used for ZPL portion  */
+unsigned int    LastBitmapSize; /* Buffer size for the last bitmap; only used for ZPL portion  */
+unsigned int    ThisBitmapSize; /* Buffer size for the current bitmap; only used for ZPL portion  */
+
 unsigned char	*Buffer;		/* Output buffer */
 unsigned char	*CompBuffer;		/* Compression buffer */
 unsigned char	*LastBuffer;		/* Last buffer */
@@ -66,15 +71,15 @@ int		ModelNumber,		/* cupsModelNumber attribute */
 		Page,			/* Current page */
 		Canceled;		/* Non-zero if job is canceled */
 unsigned int	ZPLBitmapDataFormat=0;	/* ZPL data format (0 - ASCII, 1 - ASCII with zero-fill+ones-fill+line-repeat, 2 - run-length encoded) */
-
+unsigned int	ZPLUseGraphicField=0;	/* 0 - use ~DGR, ^XG and ^IDR ; 1 - use ^GF command */
 
 /*
  * Prototypes...
  */
 
 void	Setup(ppd_file_t *ppd);
-void	StartPage(ppd_file_t *ppd, cups_page_header2_t *header);
-void	EndPage(ppd_file_t *ppd, cups_page_header2_t *header);
+void	StartPage(ppd_file_t *ppd, cups_page_header2_t *header, int pageRepeat, int backfeed);
+void	EndPage(ppd_file_t *ppd, cups_page_header2_t *header, int eof);
 void	CancelJob(int sig);
 void	OutputLine(ppd_file_t *ppd, cups_page_header2_t *header, unsigned y);
 void	PCLCompress(unsigned char *line, unsigned length);
@@ -146,6 +151,21 @@ Setup(ppd_file_t *ppd)			/* I - PPD file */
             /* this ensures that we don't break working setups... */
             ZPLBitmapDataFormat=2;
         }
+        
+        if ((choice = ppdFindMarkedChoice(ppd, "zeUseGraphicField")) != NULL)
+        {
+            if (!strcmp(choice->choice, "1"))
+                ZPLUseGraphicField=1;
+            else
+                ZPLUseGraphicField=0;
+        }
+        else
+        {
+            /* this ensures that we don't break working setups... */
+            ZPLUseGraphicField=0;
+        }
+
+        
         break;
 
     case ZEBRA_CPCL :
@@ -169,8 +189,11 @@ Setup(ppd_file_t *ppd)			/* I - PPD file */
 
 void
 StartPage(ppd_file_t         *ppd,	/* I - PPD file */
-          cups_page_header2_t *header)	/* I - Page header */
+          cups_page_header2_t *header,	/* I - Page header */
+          int pageRepeat,	/* I - repeat last page (ZPL only)*/
+          int backfeed)	/* I - add backfeed (ZPL only)*/
 {
+  int		val;			/* Option value */
   ppd_choice_t	*choice;		/* Marked choice */
   unsigned	length;			/* Actual label length */
 
@@ -289,20 +312,172 @@ StartPage(ppd_file_t         *ppd,	/* I - PPD file */
         break;
 
     case ZEBRA_ZPL :
+        puts("^XA");
+        
+        if (!backfeed)
+        {
+            /*
+            * Suppress Backfeed
+            */
+            puts("^XB");
+        }
+        
+        /*
+        * Allows to rotate 180 degrees so that the top of the label/page is at the
+        * leading edge...
+        */
+
+        if ((choice = ppdFindMarkedChoice(ppd, "zePrintRotate")) != NULL)
+        {
+            if (!strcmp(choice->choice, "180"))
+                puts("^POI");
+            else if (!strcmp(choice->choice, "0"))
+                puts("^PON");
+        }
+        else
+        {
+            /* This makes ensures that we don't break working setups... */
+            puts("^POI");
+        }
+
+        /*
+            * Set print width...
+        */
+
+            printf("^PW%u\n", header->cupsWidth);
+
+        /*
+            * Set print rate...
+        */
+
+        if ((choice = ppdFindMarkedChoice(ppd, "zePrintRate")) != NULL &&
+            strcmp(choice->choice, "Default"))
+        {
+        val = atoi(choice->choice);
+        printf("^PR%d,%d,%d\n", val, val, val);
+        }
+
+        /*
+            * Put label home in default position (0,0)...
+            */
+
+        printf("^LH0,0\n");
+
+        /*
+            * Set media tracking...
+        */
+
+        if (ppdIsMarked(ppd, "zeMediaTracking", "Continuous"))
+        {
+            /*
+        * Add label length command for continuous...
+        */
+
+        printf("^LL%d\n", header->cupsHeight);
+        printf("^MNN\n");
+        }
+        else if (ppdIsMarked(ppd, "zeMediaTracking", "Web"))
+            printf("^MNY\n");
+        else if (ppdIsMarked(ppd, "zeMediaTracking", "Mark"))
+        printf("^MNM\n");
+
+        /*
+            * Set label top
+        */
+
+        if (header->cupsRowStep != 200)
+        printf("^LT%d\n", header->cupsRowStep);
+
+        /*
+            * Set media type...
+        */
+
+        if (!strcmp(header->MediaType, "Thermal"))
+        printf("^MTT\n");
+        else if (!strcmp(header->MediaType, "Direct"))
+        printf("^MTD\n");
+
+        /*
+            * Set print mode...
+        */
+
+        if ((choice = ppdFindMarkedChoice(ppd, "zePrintMode")) != NULL &&
+            strcmp(choice->choice, "Saved"))
+        {
+        printf("^MM");
+
+        if (!strcmp(choice->choice, "Tear"))
+            printf("T,Y\n");
+        else if (!strcmp(choice->choice, "Peel"))
+            printf("P,Y\n");
+        else if (!strcmp(choice->choice, "Rewind"))
+            printf("R,Y\n");
+        else if (!strcmp(choice->choice, "Applicator"))
+            printf("A,Y\n");
+        else
+            printf("C,Y\n");
+        }
+
+        /*
+            * Set tear-off adjust position...
+        */
+
+        if (header->AdvanceDistance != 1000)
+        {
+        if ((int)header->AdvanceDistance < 0)
+            printf("~TA%04d\n", (int)header->AdvanceDistance);
+        else
+            printf("~TA%03d\n", (int)header->AdvanceDistance);
+        }
+
+        /*
+            * Allow for reprinting after an error...
+        */
+
+        if (ppdIsMarked(ppd, "zeErrorReprint", "Always"))
+            printf("^JZY\n");
+        else if (ppdIsMarked(ppd, "zeErrorReprint", "Never"))
+            printf("^JZN\n");
+
        /*
-        * Set darkness...
-	*/
+        * Print multiple copies
+        */
 
-        if (header->cupsCompression > 0 && header->cupsCompression <= 100)
-	  printf("~SD%02u\n", 30 * header->cupsCompression / 100);
+        //if (header->NumCopies > 1)
+            printf("^PQ%d, 0, 0, N\n", header->NumCopies);
+        
+        if (ZPLUseGraphicField)
+        {
+                printf("^GFA,%u,%u,%u,",
+                header->cupsHeight * header->cupsBytesPerLine,
+                header->cupsHeight * header->cupsBytesPerLine,
+                header->cupsBytesPerLine);
+        }
+        else
+        {
+            if (!pageRepeat)
+            {
+                /*
+                * We're not repeating the last page, so we clear the old file
+                */
+                puts("^IDR:CUPS.GRF^FS");
 
-       /*
-        * Start bitmap graphics...
-	*/
+                /*
+                * Set darkness...
+                */
+        
+                if (header->cupsCompression > 0 && header->cupsCompression <= 100)
+                printf("~SD%02u\n", 30 * header->cupsCompression / 100);
 
-        printf("~DGR:CUPS.GRF,%u,%u,\n",
-	       header->cupsHeight * header->cupsBytesPerLine,
-	       header->cupsBytesPerLine);
+                /*
+                * Start bitmap graphics...
+                */
+
+                printf("~DGR:CUPS.GRF,%u,%u,\n",
+                header->cupsHeight * header->cupsBytesPerLine,
+                header->cupsBytesPerLine);
+            }
+        }
 
        /*
         * Allocate compression buffers...
@@ -456,7 +631,8 @@ StartPage(ppd_file_t         *ppd,	/* I - PPD file */
 
 void
 EndPage(ppd_file_t          *ppd,	/* I - PPD file */
-        cups_page_header2_t *header)	/* I - Page header */
+        cups_page_header2_t *header,	/* I - Page header */
+        int		eof)	/* I - this is the last page */
 {
   int		val;			/* Option value */
   ppd_choice_t	*choice;		/* Marked choice */
@@ -503,165 +679,40 @@ EndPage(ppd_file_t          *ppd,	/* I - PPD file */
 	  */
 
 	  puts("~DN");
+      puts("^XZ\n");
 	  break;
 	}
 
-       /*
-        * Start label...
-	*/
-
-        puts("^XA");
-
-       /*
-        * Allows to rotate 180 degrees so that the top of the label/page is at the
-	* leading edge...
-	*/
-
-	if ((choice = ppdFindMarkedChoice(ppd, "zePrintRotate")) != NULL)
-	{
-		if (!strcmp(choice->choice, "180"))
-			puts("^POI");
-		else if (!strcmp(choice->choice, "0"))
-			puts("^PON");
-	}
-	else
-	{
-		/* This makes ensures that we don't break working setups... */
-		puts("^POI");
-	}
-
-       /*
-        * Set print width...
-	*/
-
-        printf("^PW%u\n", header->cupsWidth);
-
-       /*
-        * Set print rate...
-	*/
-
-	if ((choice = ppdFindMarkedChoice(ppd, "zePrintRate")) != NULL &&
-	    strcmp(choice->choice, "Default"))
-	{
-	  val = atoi(choice->choice);
-	  printf("^PR%d,%d,%d\n", val, val, val);
-	}
-
-       /*
-        * Put label home in default position (0,0)...
-        */
-
-	printf("^LH0,0\n");
-
-       /*
-        * Set media tracking...
-	*/
-
-	if (ppdIsMarked(ppd, "zeMediaTracking", "Continuous"))
-	{
-         /*
-	  * Add label length command for continuous...
-	  */
-
-	  printf("^LL%d\n", header->cupsHeight);
-	  printf("^MNN\n");
-	}
-	else if (ppdIsMarked(ppd, "zeMediaTracking", "Web"))
-          printf("^MNY\n");
-	else if (ppdIsMarked(ppd, "zeMediaTracking", "Mark"))
-	  printf("^MNM\n");
-
-       /*
-        * Set label top
-	*/
-
-	if (header->cupsRowStep != 200)
-	  printf("^LT%d\n", header->cupsRowStep);
-
-       /*
-        * Set media type...
-	*/
-
-	if (!strcmp(header->MediaType, "Thermal"))
-	  printf("^MTT\n");
-	else if (!strcmp(header->MediaType, "Direct"))
-	  printf("^MTD\n");
-
-       /*
-        * Set print mode...
-	*/
-
-	if ((choice = ppdFindMarkedChoice(ppd, "zePrintMode")) != NULL &&
-	    strcmp(choice->choice, "Saved"))
-	{
-	  printf("^MM");
-
-	  if (!strcmp(choice->choice, "Tear"))
-	    printf("T,Y\n");
-	  else if (!strcmp(choice->choice, "Peel"))
-	    printf("P,Y\n");
-	  else if (!strcmp(choice->choice, "Rewind"))
-	    printf("R,Y\n");
-	  else if (!strcmp(choice->choice, "Applicator"))
-	    printf("A,Y\n");
-	  else
-	    printf("C,Y\n");
-	}
-
-       /*
-        * Set tear-off adjust position...
-	*/
-
-	if (header->AdvanceDistance != 1000)
-	{
-	  if ((int)header->AdvanceDistance < 0)
-	    printf("~TA%04d\n", (int)header->AdvanceDistance);
-	  else
-	    printf("~TA%03d\n", (int)header->AdvanceDistance);
-	}
-
-       /*
-        * Allow for reprinting after an error...
-	*/
-
-	if (ppdIsMarked(ppd, "zeErrorReprint", "Always"))
-	  printf("^JZY\n");
-	else if (ppdIsMarked(ppd, "zeErrorReprint", "Never"))
-	  printf("^JZN\n");
-
-       /*
-        * Print multiple copies
-	*/
-
-	if (header->NumCopies > 1)
-	  printf("^PQ%d, 0, 0, N\n", header->NumCopies);
-
-       /*
+    if (!ZPLUseGraphicField)
+    {
+        /*
         * Display the label image...
-	*/
-
-	puts("^FO0,0^XGR:CUPS.GRF,1,1^FS");
-
-       /*
-        * End the label and eject...
-	*/
-
-	puts("^XZ");
-
-       /*
-        * Delete the label image...
         */
 
-	puts("^XA");
-        puts("^IDR:CUPS.GRF^FS");
-	puts("^XZ");
+        puts("^FO0,0^XGR:CUPS.GRF,1,1^FS");
+
+        /*
+        * End the label and eject...
+        */
+
+        if (eof)
+        {
+            /*
+            * Delete the label image...
+            */
+
+            puts("^IDR:CUPS.GRF^FS");
+        }
+    }
+
+    puts("^XZ\n");
 
        /*
         * Cut the label as needed...
         */
 
       	if (header->CutMedia)
-	  puts("^CN1");
+            puts("^CN1");
         break;
 
     case ZEBRA_CPCL :
@@ -1167,11 +1218,16 @@ main(int  argc,				/* I - Number of command-line arguments */
 {
   int			fd;		/* File descriptor */
   cups_raster_t		*ras;		/* Raster stream for printing */
-  cups_page_header2_t	header;		/* Page header from file */
+  cups_page_header2_t	header[2];		/* Page header from file */
+  cups_page_header2_t	*thisHeader;		/* Page header from file */
+  cups_page_header2_t	*nextHeader;		/* Page header from file */
+  
   unsigned		y;		/* Current line */
   ppd_file_t		*ppd;		/* PPD file */
   int			num_options;	/* Number of options */
   cups_option_t		*options;	/* Options */
+  int          eof;    /*  We're on the last page */
+  int          pageRepeat; /*  1 indicates that the page data did not change */
 #if defined(HAVE_SIGACTION) && !defined(HAVE_SIGSET)
   struct sigaction action;		/* Actions for POSIX signals */
 #endif /* HAVE_SIGACTION && !HAVE_SIGSET */
@@ -1273,9 +1329,61 @@ main(int  argc,				/* I - Number of command-line arguments */
   */
 
   Page = 0;
+  ThisBitmapSize=0;
+  LastBitmapSize=0;
+  
+  ThisBitmap=0;
+  LastBitmap=0;
+  
+  thisHeader=&header[0];
+  nextHeader=&header[1];
+  
+  eof=(cupsRasterReadHeader2(ras, thisHeader)==0);
 
-  while (cupsRasterReadHeader2(ras, &header))
+  while (!eof)
   {
+      const unsigned int currentBitmapSize=thisHeader->cupsHeight*thisHeader->cupsBytesPerLine;
+      
+      /*
+      * Adjust allocated buffer size if needed, fetch the whole page and check if it has changed
+      */
+      
+      if (ThisBitmapSize != currentBitmapSize)
+      {
+          if (ThisBitmap)
+            free(ThisBitmap);
+          ThisBitmapSize=currentBitmapSize;
+          ThisBitmap=malloc(currentBitmapSize);
+      }
+      
+      if (cupsRasterReadPixels(ras, ThisBitmap, currentBitmapSize)<currentBitmapSize)
+      {
+              _cupsLangPrintFilter(stderr, "ERROR", _("Raster stream EOF."));
+              break;
+      }
+      
+      if (ThisBitmapSize==LastBitmapSize)
+      {
+          pageRepeat=memcmp(ThisBitmap, LastBitmap, currentBitmapSize)==0;
+      }
+      else
+          pageRepeat=0;
+      
+      /*
+      * We need to download the data for every label if we use the ^GF command...
+      */
+
+      if (ZPLUseGraphicField)
+          pageRepeat=0;
+      
+      
+      /*
+      * Fetch the next header to see if we're on the last page already
+      * This is ok since we have already fetched the whole page.
+      */
+
+      eof=(cupsRasterReadHeader2(ras, nextHeader)==0);
+
    /*
     * Write a status message with the page number and number of copies.
     */
@@ -1292,55 +1400,80 @@ main(int  argc,				/* I - Number of command-line arguments */
     * Start the page...
     */
 
-    StartPage(ppd, &header);
+    StartPage(ppd, thisHeader, pageRepeat, (eof | Canceled));
 
-   /*
+    /*
     * Loop for each line on the page...
     */
 
-    for (y = 0; y < header.cupsHeight && !Canceled; y ++)
+    for (y = 0; y < thisHeader->cupsHeight && !Canceled && !pageRepeat; y ++)
     {
-     /*
-      * Let the user know how far we have progressed...
-      */
+        /*
+        * Let the user know how far we have progressed...
+        */
 
-      if (Canceled)
-	break;
+        if (Canceled)
+            break;
 
-      if ((y & 15) == 0)
-      {
-        _cupsLangPrintFilter(stderr, "INFO",
-	                     _("Printing page %d, %u%% complete."),
-			     Page, 100 * y / header.cupsHeight);
-        fprintf(stderr, "ATTR: job-media-progress=%u\n",
-		100 * y / header.cupsHeight);
-      }
+        if ((y & 15) == 0)
+        {
+            _cupsLangPrintFilter(stderr, "INFO",
+                            _("Printing page %d, %u%% complete."),
+                    Page, 100 * y / thisHeader->cupsHeight);
+            fprintf(stderr, "ATTR: job-media-progress=%u\n",
+            100 * y / thisHeader->cupsHeight);
+        }
 
-     /*
-      * Read a line of graphics...
-      */
+        /*
+        * Read a line of graphics...
+        */
 
-      if (cupsRasterReadPixels(ras, Buffer, header.cupsBytesPerLine) < 1)
-        break;
+        memcpy(Buffer, &ThisBitmap[y*(thisHeader->cupsBytesPerLine)], thisHeader->cupsBytesPerLine);
 
-     /*
-      * Write it to the printer...
-      */
+        /*
+        * Write it to the printer...
+        */
 
-      OutputLine(ppd, &header, y);
+        OutputLine(ppd, thisHeader, y);
     }
+    /*
+     * add a linefeed after the image data
+     */ 
+    if (!pageRepeat)
+        puts("");
 
-   /*
+    /*
     * Eject the page...
     */
 
     _cupsLangPrintFilter(stderr, "INFO", _("Finished page %d."), Page);
 
-    EndPage(ppd, &header);
+    EndPage(ppd, thisHeader, eof);
 
     if (Canceled)
       break;
+    
+    if (LastBitmapSize != currentBitmapSize)
+    {
+        if (LastBitmap)
+            free(LastBitmap);
+        LastBitmapSize=currentBitmapSize;
+        LastBitmap=malloc(currentBitmapSize);
+    }
+    
+    if (!pageRepeat)
+        memcpy(LastBitmap, ThisBitmap, currentBitmapSize);
+    
+    
+    cups_page_header2_t *tmp=thisHeader;
+    thisHeader=nextHeader;
+    nextHeader=tmp;
   }
+  
+  if (ThisBitmap)
+    free(ThisBitmap);
+  if (LastBitmap)
+    free(LastBitmap);
 
  /*
   * Close the raster stream...

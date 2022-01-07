@@ -1029,6 +1029,9 @@ Version "2.3"
 	*Choice "180/Top of the label/page is at the leading edge)" ""
 	Choice "0/No rotation" ""
 	Choice "NoPOCmd/Do not set orientation" ""
+      Option "zeUseGraphicField/Graphic Placement" PickOne AnySetup 20.0
+	Choice "1/Use graphic-field command" ""
+	*Choice "0/Download to file" ""
     Group "PrinterSettings/Printer Settings"
       Option "Darkness" PickOne AnySetup 20.0
 	*Choice "-1/Printer Default" "<</cupsCompression -1>>setpagedevice"
